@@ -352,6 +352,90 @@ function getLastAssistantText(entries: SessionEntry[]): string | null {
 	return null;
 }
 
+// beautiful-mermaid emits CSS custom properties and color-mix() in a <style>
+// block; resvg resolves neither, so every fill/stroke collapses to black and
+// the canvas stays transparent (black squares on a dark terminal). Resolve
+// them to literal hex colors before rasterizing.
+function parseHexColor(color: string): [number, number, number] | null {
+	const m = color.trim().match(/^#([0-9a-fA-F]{6})$/);
+	if (!m) return null;
+	const hex = m[1];
+	return [
+		parseInt(hex.slice(0, 2), 16),
+		parseInt(hex.slice(2, 4), 16),
+		parseInt(hex.slice(4, 6), 16),
+	];
+}
+
+function formatHexColor([r, g, b]: [number, number, number]): string {
+	const toHex = (n: number) => n.toString(16).padStart(2, "0");
+	return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function mixHexColors(a: string, b: string, percentA: number): string | null {
+	const ca = parseHexColor(a);
+	const cb = parseHexColor(b);
+	if (!ca || !cb) return null;
+	const weight = Math.min(Math.max(percentA, 0), 100) / 100;
+	return formatHexColor([
+		Math.round(ca[0] * weight + cb[0] * (1 - weight)),
+		Math.round(ca[1] * weight + cb[1] * (1 - weight)),
+		Math.round(ca[2] * weight + cb[2] * (1 - weight)),
+	]);
+}
+
+export function resolveSvgCssColors(svg: string): string {
+	let out = svg;
+	for (let pass = 0; pass < 10; pass++) {
+		const before = out;
+
+		// Custom properties from the root style attribute and <style> block.
+		const customProps = new Map<string, string>();
+		const rootStyle = out.match(/<svg[^>]*? style="([^"]*)"/)?.[1];
+		if (rootStyle) {
+			for (const decl of rootStyle.split(";")) {
+				const m = decl.match(/^(--[\w-]+):(.+)$/);
+				if (m) customProps.set(m[1], m[2].trim());
+			}
+		}
+		for (const m of out.matchAll(/(--[\w-]+)\s*:\s*([^;{}]+)[;{]/g)) {
+			if (!customProps.has(m[1])) customProps.set(m[1], m[2].trim());
+		}
+
+		// color-mix(in srgb, #a P%, #b) over already-literal colors.
+		out = out.replace(
+			/color-mix\(\s*in\s+srgb\s*,\s*(#[0-9a-fA-F]{6})\s+([\d.]+)%\s*,\s*(#[0-9a-fA-F]{6})\s*\)/g,
+			(match, a: string, pct: string, b: string) => mixHexColors(a, b, Number(pct)) ?? match,
+		);
+
+		// var(--x)
+		out = out.replace(/var\((--[\w-]+)\)/g, (match, name: string) => customProps.get(name) ?? match);
+
+		// var(--x, fallback) once the fallback itself is literal
+		out = out.replace(
+			/var\((--[\w-]+),\s*([^()]+)\)/g,
+			(match, name: string, fallback: string) => customProps.get(name) ?? fallback.trim(),
+		);
+
+		if (out === before) break;
+	}
+
+	// resvg ignores the CSS `background` property on the root; bake it as a
+	// backing rect instead.
+	const rootStyleMatch = out.match(/<svg[^>]*? style="([^"]*)"/);
+	const bg = rootStyleMatch?.[1].match(/background:(#[0-9a-fA-F]{6})/)?.[1];
+	if (rootStyleMatch && bg) {
+		const cleanedStyle = rootStyleMatch[1]
+			.replace(/;?background:#[0-9a-fA-F]{6}/, "")
+			.replace(/^;/, "");
+		out = out
+			.replace(rootStyleMatch[0], rootStyleMatch[0].replace(rootStyleMatch[1], cleanedStyle))
+			.replace(/(<svg[^>]*>)/, `$1<rect width="100%" height="100%" fill="${bg}"/>`);
+	}
+
+	return out;
+}
+
 async function processBlock(
 	block: string,
 	blockIndex: number,
@@ -428,7 +512,7 @@ async function processBlock(
 	let pngBase64: string | null = null;
 	if (!parserFailed) {
 		try {
-			const svg = renderMermaidSVG(block);
+			const svg = resolveSvgCssColors(renderMermaidSVG(block, { bg: "#FFFFFF", fg: "#27272A" }));
 			const resvg = new Resvg(svg, { fitTo: { mode: "width", value: 900 } });
 			pngBase64 = Buffer.from(resvg.render().asPng()).toString("base64");
 		} catch {
@@ -498,9 +582,10 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
+		box.addChild(asciiComponent);
 		const png = details?.png;
 		if (png && getCapabilities().images === "kitty") {
-			box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Mermaid")), 0, 0));
+			box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Mermaid (image)")), 0, 0));
 			box.addChild(
 				new Image(png, "image/png", { fallbackColor: (s) => theme.fg("muted", s) }, {
 					maxWidthCells: 60,
