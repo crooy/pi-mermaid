@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext, MessageRenderer, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";
-import { Box, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, getCapabilities, Image, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { createHash } from "node:crypto";
-import { renderMermaidAscii } from "beautiful-mermaid";
+import { Resvg } from "@resvg/resvg-js";
+import { renderMermaidAscii, renderMermaidSVG } from "beautiful-mermaid";
 const MESSAGE_TYPE = "pi-mermaid";
 const MERMAID_BLOCK_RE = /```mermaid\s*([\s\S]*?)```/gi;
 const ISSUE_LINE_RE = /^\[mermaid:(warning|error)\](?:\[hash:[^\]]+\])?\s*(.*)$/;
@@ -124,6 +125,7 @@ interface MermaidDetails {
 	ascii: string;
 	lineCount: number;
 	variants?: AsciiVariant[];
+	png?: string;
 	issues?: MermaidIssue[];
 }
 
@@ -423,6 +425,16 @@ async function processBlock(
 		}
 	}
 
+	let pngBase64: string | null = null;
+	if (!parserFailed) {
+		try {
+			const svg = renderMermaidSVG(block);
+			const resvg = new Resvg(svg, { fitTo: { mode: "width", value: 900 } });
+			pngBase64 = Buffer.from(resvg.render().asPng()).toString("base64");
+		} catch {
+			pngBase64 = null;
+		}
+	}
 	return {
 		diagramHash,
 		details: {
@@ -431,6 +443,7 @@ async function processBlock(
 			ascii,
 			lineCount,
 			variants: variants && variants.length > 0 ? variants : undefined,
+			png: pngBase64 ?? undefined,
 			issues: issues.length > 0 ? issues : undefined,
 		},
 		issues,
@@ -485,7 +498,18 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
-		box.addChild(asciiComponent);
+		const png = details?.png;
+		if (png && getCapabilities().images === "kitty") {
+			box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Mermaid")), 0, 0));
+			box.addChild(
+				new Image(png, "image/png", { fallbackColor: (s) => theme.fg("muted", s) }, {
+					maxWidthCells: 60,
+					filename: "mermaid",
+				}),
+			);
+		} else {
+			box.addChild(asciiComponent);
+		}
 
 		if (expanded && details?.source) {
 			box.addChild(new Spacer(1));
