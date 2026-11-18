@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, MessageRenderer, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";
-import { Box, getCapabilities, Image, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, getCapabilities, getCellDimensions, getPngDimensions, Image, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { createHash } from "node:crypto";
 import { Resvg } from "@resvg/resvg-js";
 import { renderMermaidAscii, renderMermaidSVG } from "beautiful-mermaid";
@@ -13,6 +13,9 @@ const MAX_SOURCE_LINES = 400;
 const MAX_SOURCE_CHARS = 20000;
 const MAX_SEEN_ISSUES = 200;
 const MAX_ASCII_CACHE = 200;
+const PNG_RASTER_ZOOM = 2;
+const MIN_IMAGE_CELLS = 12;
+const MAX_IMAGE_CELLS = 60;
 const ASCII_PRESETS: Array<{ key: string; paddingX: number; boxBorderPadding: number }> = [
 	{ key: "default", paddingX: 5, boxBorderPadding: 1 },
 	{ key: "compact", paddingX: 3, boxBorderPadding: 1 },
@@ -512,8 +515,8 @@ async function processBlock(
 	let pngBase64: string | null = null;
 	if (!parserFailed) {
 		try {
-			const svg = resolveSvgCssColors(renderMermaidSVG(block, { bg: "#FFFFFF", fg: "#27272A" }));
-			const resvg = new Resvg(svg, { fitTo: { mode: "width", value: 900 } });
+			const svg = resolveSvgCssColors(renderMermaidSVG(block, { bg: "#FFFFFF", fg: "#27272A", padding: 16 }));
+			const resvg = new Resvg(svg, { fitTo: { mode: "zoom", value: PNG_RASTER_ZOOM } });
 			pngBase64 = Buffer.from(resvg.render().asPng()).toString("base64");
 		} catch {
 			pngBase64 = null;
@@ -586,9 +589,14 @@ export default function (pi: ExtensionAPI) {
 		const png = details?.png;
 		if (png && getCapabilities().images === "kitty") {
 			box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Mermaid (image)")), 0, 0));
+			// Display cells follow the natural diagram size; the PNG itself is
+			// rasterized at PNG_RASTER_ZOOM for sharpness.
+			const dims = getPngDimensions(png);
+			const cellWidth = getCellDimensions().widthPx || 9;
+			const naturalCells = dims ? Math.ceil(dims.widthPx / PNG_RASTER_ZOOM / cellWidth) : MAX_IMAGE_CELLS;
 			box.addChild(
 				new Image(png, "image/png", { fallbackColor: (s) => theme.fg("muted", s) }, {
-					maxWidthCells: 60,
+					maxWidthCells: Math.max(MIN_IMAGE_CELLS, Math.min(MAX_IMAGE_CELLS, naturalCells)),
 					filename: "mermaid",
 				}),
 			);
