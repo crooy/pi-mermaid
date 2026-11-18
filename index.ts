@@ -3,11 +3,10 @@ import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";
 import { Box, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { createHash } from "node:crypto";
 import { renderMermaidAscii } from "beautiful-mermaid";
-
 const MESSAGE_TYPE = "pi-mermaid";
 const MERMAID_BLOCK_RE = /```mermaid\s*([\s\S]*?)```/gi;
 const ISSUE_LINE_RE = /^\[mermaid:(warning|error)\](?:\[hash:[^\]]+\])?\s*(.*)$/;
-const COLLAPSED_LINES = 10;
+const COLLAPSED_LINES = 200;
 const MAX_BLOCKS = 5;
 const MAX_SOURCE_LINES = 400;
 const MAX_SOURCE_CHARS = 20000;
@@ -41,14 +40,42 @@ const asciiCache = new Map<string, AsciiVariant>();
 const asciiLinesCache = new Map<string, { lines: string[]; previewLines: string[] }>();
 
 function isDomPurifyError(message: string): boolean {
-	return message.includes("DOMPurify.addHook") || message.includes("DOMPurify");
+	return /dompurify/i.test(message) || message.includes("addHook is not a function");
+}
+
+// DOMPurify >= 3.3 returns a bare factory without addHook/sanitize when no
+// `window` exists, so mermaid's parse-time sanitization crashes in terminal
+// runtimes. A minimal window shim lets the mermaid module graph initialize;
+// DOMPurify then reports isSupported=false and sanitize passes text through.
+const windowShim = {
+	document: { nodeType: 9, createElement: () => ({}) },
+	Element: function Element() {},
+};
+let windowShimCount = 0;
+
+function acquireWindowShim(): void {
+	if (windowShimCount++ === 0) {
+		(globalThis as { window?: unknown }).window = windowShim;
+	}
+}
+
+function releaseWindowShim(): void {
+	if (windowShimCount > 0 && --windowShimCount === 0) {
+		delete (globalThis as { window?: unknown }).window;
+	}
 }
 
 async function getMermaidParser(): Promise<((text: string) => Promise<void>) | null> {
 	if (mermaidParser || mermaidParserError) return mermaidParser;
 
 	try {
-		const mod = await import("mermaid");
+		acquireWindowShim();
+		let mod: any;
+		try {
+			mod = await import("mermaid");
+		} finally {
+			releaseWindowShim();
+		}
 		const api = (mod as any).default ?? (mod as any).mermaidAPI ?? mod;
 		if (!api || typeof api.parse !== "function") {
 			mermaidParserError = "Mermaid parse API not available";
@@ -62,9 +89,14 @@ async function getMermaidParser(): Promise<((text: string) => Promise<void>) | n
 			}
 		}
 		mermaidParser = async (text: string) => {
-			const result = api.parse(text);
-			if (result && typeof result.then === "function") {
-				await result;
+			acquireWindowShim();
+			try {
+				const result = api.parse(text);
+				if (result && typeof result.then === "function") {
+					await result;
+				}
+			} finally {
+				releaseWindowShim();
 			}
 		};
 		return mermaidParser;
@@ -94,6 +126,7 @@ interface MermaidDetails {
 	variants?: AsciiVariant[];
 	issues?: MermaidIssue[];
 }
+
 
 type MermaidNotification = { message: string; type: "warning" | "error" };
 
@@ -404,6 +437,7 @@ async function processBlock(
 		notifications,
 	};
 }
+
 
 export default function (pi: ExtensionAPI) {
 	const renderMermaidMessage: MessageRenderer<MermaidDetails> = (message, { expanded }, theme) => {
