@@ -3,6 +3,10 @@ import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";
 import { Box, getCapabilities, getCellDimensions, getPngDimensions, Image, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { createHash } from "node:crypto";
 import { Resvg } from "@resvg/resvg-js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { renderMermaidAscii, renderMermaidSVG } from "beautiful-mermaid";
 const MESSAGE_TYPE = "pi-mermaid";
 const MERMAID_BLOCK_RE = /```mermaid\s*([\s\S]*?)```/gi;
@@ -15,7 +19,7 @@ const MAX_SEEN_ISSUES = 200;
 const MAX_ASCII_CACHE = 200;
 const PNG_RASTER_ZOOM = 2;
 const MIN_IMAGE_CELLS = 12;
-const MAX_IMAGE_CELLS = 60;
+const MAX_IMAGE_CELLS = 120;
 const ASCII_PRESETS: Array<{ key: string; paddingX: number; boxBorderPadding: number }> = [
 	{ key: "default", paddingX: 5, boxBorderPadding: 1 },
 	{ key: "compact", paddingX: 3, boxBorderPadding: 1 },
@@ -129,6 +133,7 @@ interface MermaidDetails {
 	lineCount: number;
 	variants?: AsciiVariant[];
 	png?: string;
+	pngPath?: string;
 	issues?: MermaidIssue[];
 }
 
@@ -439,6 +444,25 @@ export function resolveSvgCssColors(svg: string): string {
 	return out;
 }
 
+const pngCacheDir = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "pi-mermaid");
+
+// Persist the full-size render so a downscaled inline image can still be
+// opened full size via the OSC 8 file link shown in the TUI.
+async function savePngFile(diagramHash: string, pngBase64: string): Promise<string | null> {
+	try {
+		await mkdir(pngCacheDir, { recursive: true });
+		const filePath = join(pngCacheDir, `mermaid-${diagramHash}.png`);
+		await writeFile(filePath, Buffer.from(pngBase64, "base64"));
+		return filePath;
+	} catch {
+		return null;
+	}
+}
+
+function hyperlink(url: string, text: string): string {
+	return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
+}
+
 async function processBlock(
 	block: string,
 	blockIndex: number,
@@ -513,6 +537,7 @@ async function processBlock(
 	}
 
 	let pngBase64: string | null = null;
+	let pngPath: string | null = null;
 	if (!parserFailed) {
 		try {
 			const svg = resolveSvgCssColors(renderMermaidSVG(block, { bg: "#FFFFFF", fg: "#27272A", padding: 16 }));
@@ -520,6 +545,9 @@ async function processBlock(
 			pngBase64 = Buffer.from(resvg.render().asPng()).toString("base64");
 		} catch {
 			pngBase64 = null;
+		}
+		if (pngBase64) {
+			pngPath = await savePngFile(diagramHash, pngBase64);
 		}
 	}
 	return {
@@ -531,6 +559,7 @@ async function processBlock(
 			lineCount,
 			variants: variants && variants.length > 0 ? variants : undefined,
 			png: pngBase64 ?? undefined,
+			pngPath: pngPath ?? undefined,
 			issues: issues.length > 0 ? issues : undefined,
 		},
 		issues,
@@ -589,17 +618,38 @@ export default function (pi: ExtensionAPI) {
 		const png = details?.png;
 		if (png && getCapabilities().images === "kitty") {
 			box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Mermaid (image)")), 0, 0));
-			// Display cells follow the natural diagram size; the PNG itself is
-			// rasterized at PNG_RASTER_ZOOM for sharpness.
+			// Display cells follow the natural diagram size up to the terminal
+			// width; the PNG itself is rasterized at PNG_RASTER_ZOOM for sharpness.
 			const dims = getPngDimensions(png);
 			const cellWidth = getCellDimensions().widthPx || 9;
 			const naturalCells = dims ? Math.ceil(dims.widthPx / PNG_RASTER_ZOOM / cellWidth) : MAX_IMAGE_CELLS;
-			box.addChild(
-				new Image(png, "image/png", { fallbackColor: (s) => theme.fg("muted", s) }, {
-					maxWidthCells: Math.max(MIN_IMAGE_CELLS, Math.min(MAX_IMAGE_CELLS, naturalCells)),
-					filename: "mermaid",
-				}),
-			);
+			const image = new Image(png, "image/png", { fallbackColor: (s) => theme.fg("muted", s) }, {
+				maxWidthCells: Math.max(MIN_IMAGE_CELLS, Math.min(MAX_IMAGE_CELLS, naturalCells)),
+				filename: "mermaid",
+			});
+			const imageComponent: Component = {
+				render: (width) => {
+					const contentWidth = Math.max(1, width);
+					const lines = image.render(contentWidth);
+					const fitCells = Math.min(contentWidth - 2, MAX_IMAGE_CELLS);
+					if (naturalCells > fitCells) {
+						const fullSize = details?.pngPath
+							? hyperlink(pathToFileURL(details.pngPath).href, basename(details.pngPath))
+							: null;
+						const note = `scaled to fit (${naturalCells} cells needed)${fullSize ? ` — open full size: ${fullSize}` : ""}`;
+						lines.push(truncateToWidth(theme.fg("muted", note), contentWidth));
+						lines.push(
+							truncateToWidth(
+								theme.fg("muted", `or ask: "redraw this diagram vertically (direction TB)"`),
+								contentWidth,
+							),
+						);
+					}
+					return lines;
+				},
+				invalidate: () => image.invalidate(),
+			};
+			box.addChild(imageComponent);
 		} else {
 			box.addChild(asciiComponent);
 		}
