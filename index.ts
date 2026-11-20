@@ -17,9 +17,8 @@ const MAX_SOURCE_LINES = 400;
 const MAX_SOURCE_CHARS = 20000;
 const MAX_SEEN_ISSUES = 200;
 const MAX_ASCII_CACHE = 200;
-const PNG_RASTER_ZOOM = 2;
-const MIN_IMAGE_CELLS = 12;
-const MAX_IMAGE_CELLS = 120;
+const PNG_RASTER_ZOOM = 4;
+const MAX_IMAGE_CELLS = 200;
 const ASCII_PRESETS: Array<{ key: string; paddingX: number; boxBorderPadding: number }> = [
 	{ key: "default", paddingX: 5, boxBorderPadding: 1 },
 	{ key: "compact", paddingX: 3, boxBorderPadding: 1 },
@@ -614,7 +613,6 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
-		box.addChild(asciiComponent);
 		const png = details?.png;
 		if (png && getCapabilities().images === "kitty") {
 			box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Mermaid (image)")), 0, 0));
@@ -624,7 +622,7 @@ export default function (pi: ExtensionAPI) {
 			const cellWidth = getCellDimensions().widthPx || 9;
 			const naturalCells = dims ? Math.ceil(dims.widthPx / PNG_RASTER_ZOOM / cellWidth) : MAX_IMAGE_CELLS;
 			const image = new Image(png, "image/png", { fallbackColor: (s) => theme.fg("muted", s) }, {
-				maxWidthCells: Math.max(MIN_IMAGE_CELLS, Math.min(MAX_IMAGE_CELLS, naturalCells)),
+				maxWidthCells: MAX_IMAGE_CELLS,
 				filename: "mermaid",
 			});
 			const imageComponent: Component = {
